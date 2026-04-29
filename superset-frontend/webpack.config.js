@@ -198,11 +198,14 @@ if (!process.env.CI) {
 
 // Add React Refresh plugin for development mode
 if (isDevMode) {
+  // Do not set exclude to only /service-worker/: that would replace the plugin's
+  // default "exclude: /node_modules/" and the refresh loader would run on
+  // node_modules (e.g. react-checkbox-tree), causing:
+  // "Cannot set properties of undefined (setting 'runtime')".
+  // @see pmmmwh/react-refresh-webpack-plugin#646
   plugins.push(
     new ReactRefreshWebpackPlugin({
-      // Exclude service worker from React Refresh - it runs in a worker context
-      // without DOM/window and doesn't need HMR
-      exclude: /service-worker/,
+      exclude: [/node_modules/i, /service-worker/],
     }),
   );
 }

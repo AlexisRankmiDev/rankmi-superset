@@ -48,6 +48,61 @@ from superset.utils import json
 logger = logging.getLogger(__name__)
 
 
+def _wrap_mcp_asgi_with_root_info(
+    asgi_app: Any,
+    host: str,
+    port: int,
+) -> Any:
+    """
+    Serve small JSON bodies on ``GET /`` and ``GET /mcp``, and silence
+    ``/favicon.ico``, so opening URLs in a browser does not show 404/405.
+    Streamable-http MCP traffic (POST/SSE to ``/mcp``) is delegated to the app.
+    """
+    from starlette.responses import JSONResponse, Response
+
+    display_host = host if host not in ("0.0.0.0", "::") else "127.0.0.1"
+    base = f"http://{display_host}:{port}"
+
+    async def mcp_info_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "http":
+            method = scope.get("method", "")
+            path = scope.get("path", "") or ""
+            if method == "GET" and path in ("/", ""):
+                payload = {
+                    "service": "Apache Superset MCP",
+                    "mcp": f"{base}/mcp",
+                    "message": (
+                        "MCP (Model Context Protocol) endpoint. Point your AI client "
+                        "(Claude, Cursor, ChatGPT, etc.) at the mcp URL. The root path "
+                        "is for quick discovery; protocol traffic uses /mcp."
+                    ),
+                }
+                response = JSONResponse(payload)
+                await response(scope, receive, send)
+                return
+            if method == "GET" and path.rstrip("/") == "/mcp":
+                payload = {
+                    "service": "Apache Superset MCP",
+                    "endpoint": f"{base}/mcp",
+                    "note": (
+                        "Browsers send GET here and only see this page. MCP clients "
+                        "connect with streamable-http (POST/SSE), not a normal page load. "
+                        "Add this URL in Cursor, Claude, or ChatGPT as an MCP server."
+                    ),
+                }
+                response = JSONResponse(payload)
+                await response(scope, receive, send)
+                return
+            if method == "GET" and path == "/favicon.ico":
+                # Avoid 404 noise in browser devtools when loading :port/
+                response = Response(status_code=204)
+                await response(scope, receive, send)
+                return
+        await asgi_app(scope, receive, send)
+
+    return mcp_info_app
+
+
 def _suppress_third_party_warnings() -> None:
     """Suppress known third-party deprecation warnings from MCP responses.
 
@@ -656,16 +711,17 @@ def run_server(
                     event_store=event_store,
                     stateless_http=True,
                 )
+                app = _wrap_mcp_asgi_with_root_info(app, host, port)
                 uvicorn.run(app, host=host, port=port)
             else:
-                # Single-pod mode: Use built-in run() with in-memory sessions
+                # Single-pod: http_app (same as built-in run) + root / discovery
                 logging.info("Running in single-pod mode with in-memory sessions")
-                mcp_instance.run(
+                app = mcp_instance.http_app(
                     transport="streamable-http",
-                    host=host,
-                    port=port,
                     stateless_http=True,
                 )
+                app = _wrap_mcp_asgi_with_root_info(app, host, port)
+                uvicorn.run(app, host=host, port=port)
         except Exception as e:
             logging.error("FastMCP failed: %s", e)
             os.environ.pop(env_key, None)

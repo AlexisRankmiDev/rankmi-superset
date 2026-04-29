@@ -229,9 +229,9 @@ COPY superset-core superset-core
 
 RUN --mount=type=cache,target=${SUPERSET_HOME}/.cache/uv \
     /app/docker/pip-install.sh --requires-build-essential -r requirements/base.txt
-# Install the superset package
+# Install the superset package (redshift: SQLAlchemy dialect so Redshift appears in DB UI)
 RUN --mount=type=cache,target=${SUPERSET_HOME}/.cache/uv \
-    uv pip install -e .
+    uv pip install -e ".[redshift]"
 RUN python -m compileall /app/superset
 
 USER superset
@@ -261,7 +261,11 @@ RUN --mount=type=cache,target=${SUPERSET_HOME}/.cache/uv \
 RUN --mount=type=cache,target=${SUPERSET_HOME}/.cache/uv \
     uv pip install -e .
 
-RUN uv pip install .[postgres]
+RUN uv pip install .[postgres,redshift]
+# Explicit Redshift dialect: ensures "Amazon Redshift" appears under Add database even
+# when optional extra resolution or image layer cache omits sqlalchemy-redshift.
+RUN --mount=type=cache,target=${SUPERSET_HOME}/.cache/uv \
+    uv pip install 'sqlalchemy-redshift>=0.8.1,<0.9'
 RUN python -m compileall /app/superset
 
 USER superset
@@ -271,7 +275,7 @@ USER superset
 ######################################################################
 FROM lean AS ci
 USER root
-RUN uv pip install .[postgres,duckdb]
+RUN uv pip install .[postgres,duckdb,redshift]
 USER superset
 CMD ["/app/docker/entrypoints/docker-ci.sh"]
 

@@ -81,10 +81,7 @@ x-common-build: &common-build
 services:
   db-light:
     env_file:
-      - path: docker/.env # default
-        required: true
-      - path: docker/.env-local # optional override
-        required: false
+      - docker/.env
     image: postgres:17
     restart: unless-stopped
     volumes:
@@ -96,10 +93,7 @@ services:
 
   superset-light:
     env_file:
-      - path: docker/.env # default
-        required: true
-      - path: docker/.env-local # optional override
-        required: false
+      - docker/.env
     build:
       <<: *common-build
     command: ["/app/docker/docker-bootstrap.sh", "app"]
@@ -128,10 +122,7 @@ services:
       <<: *common-build
     command: ["/app/docker/docker-init.sh"]
     env_file:
-      - path: docker/.env # default
-        required: true
-      - path: docker/.env-local # optional override
-        required: false
+      - docker/.env
     user: *superset-user
     depends_on:
       db-light:
@@ -175,10 +166,7 @@ services:
       - "${NODE_PORT:-9001}:9000"  # Parameterized port, accessible on all interfaces
     command: ["/app/docker/docker-frontend.sh"]
     env_file:
-      - path: docker/.env # default
-        required: true
-      - path: docker/.env-local # optional override
-        required: false
+      - docker/.env
     volumes: *superset-volumes
 
   pytest-runner:
@@ -186,10 +174,7 @@ services:
       <<: *common-build
     entrypoint: ["/app/docker/docker-pytest-entrypoint.sh"]
     env_file:
-      - path: docker/.env # default
-        required: true
-      - path: docker/.env-local # optional override
-        required: false
+      - docker/.env
     profiles:
       - test  # Only starts when --profile test is used
     depends_on:

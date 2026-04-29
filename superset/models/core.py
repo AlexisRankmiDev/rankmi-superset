@@ -502,6 +502,7 @@ class Database(CoreDatabase, AuditMixinNullable, ImportExportMixin):  # pylint: 
             catalog=catalog,
             schema=schema,
         )
+        engine_kwargs["connect_args"] = connect_args
 
         effective_username = self.get_effective_user(sqlalchemy_url)
         if effective_username and is_feature_enabled("IMPERSONATE_WITH_EMAIL_PREFIX"):
@@ -533,6 +534,16 @@ class Database(CoreDatabase, AuditMixinNullable, ImportExportMixin):  # pylint: 
             )
 
         self.update_params_from_encrypted_extra(engine_kwargs)
+
+        # `adjust_engine_params` may return a new ``connect_args`` dict; re-run after
+        # ``encrypted_extra`` is merged so loopback/tunnel SSL and similar survive.
+        sqlalchemy_url, connect_args = self.db_engine_spec.adjust_engine_params(
+            uri=sqlalchemy_url,
+            connect_args=engine_kwargs.get("connect_args", {}),
+            catalog=catalog,
+            schema=schema,
+        )
+        engine_kwargs["connect_args"] = connect_args
 
         if DB_CONNECTION_MUTATOR := app.config["DB_CONNECTION_MUTATOR"]:  # noqa: N806
             source = source or get_query_source_from_request()

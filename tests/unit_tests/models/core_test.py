@@ -550,6 +550,30 @@ def test_get_sqla_engine(mocker: MockerFixture) -> None:
     )
 
 
+def test_get_sqla_engine_redshift_loopback_applies_adjust_connect_args(
+    mocker: MockerFixture,
+) -> None:
+    """
+    ``connect_args`` returned from ``adjust_engine_params`` must be written into
+    ``engine_kwargs`` (and re-applied after ``encrypted_extra``) so Redshift
+    loopback can set ``sslmode=require``.
+    """
+    mocker.patch("superset.models.core.get_username", return_value="alice")
+    create_engine = mocker.patch("superset.models.core.create_engine")
+    database = Database(
+        database_name="redshift_tun",
+        sqlalchemy_uri=(
+            "redshift+psycopg2://u:p@127.0.0.1:15439/dev?sslmode=verify-ca"
+        ),
+        extra="{}",
+    )
+    database._get_sqla_engine(nullpool=False)
+    call_args = create_engine.call_args
+    url_arg = call_args[0][0]
+    assert "sslmode" not in (getattr(url_arg, "query", None) or {})
+    assert call_args[1]["connect_args"]["sslmode"] == "require"
+
+
 def test_get_sqla_engine_user_impersonation(mocker: MockerFixture) -> None:
     """
     Test user impersonation in `_get_sqla_engine`.

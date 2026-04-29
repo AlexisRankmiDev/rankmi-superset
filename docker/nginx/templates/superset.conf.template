@@ -38,7 +38,7 @@ server {
     }
 
     location ${SUPERSET_APP_ROOT}/static {
-        proxy_pass http://host.docker.internal:9000;  # Proxy to superset-node
+        proxy_pass http://host.docker.internal:${NODE_PORT};  # Host port for superset-node (see NODE_PORT in docker/.env)
         proxy_http_version 1.1;
         proxy_set_header Host $host;
     }

@@ -47,10 +47,10 @@ if [[ "$DATABASE_DIALECT" == postgres* ]] && [ "$(whoami)" = "root" ] && [ "$1" 
     echo "Installing postgres requirements"
     if command -v uv > /dev/null 2>&1; then
         # Use uv in newer images
-        uv pip install -e .[postgres]
+        uv pip install -e ".[postgres,redshift]"
     else
         # Use pip in older images
-        pip install -e .[postgres]
+        pip install -e ".[postgres,redshift]"
     fi
 fi
 #

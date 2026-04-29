@@ -45,6 +45,41 @@ from superset.utils import json
 logger = logging.getLogger(__name__)
 
 
+def _resolve_acting_user_id_for_mcp_dashboard() -> int | None:
+    """
+    FAB user id to use as dashboard owner and audit ``*_by`` fields.
+
+    The MCP auth hook sets ``g.user`` before mutation tools run; prefer that id
+    so ``dashboard_user`` is populated even when ``get_user_from_request()``
+    does not succeed in this execution path (e.g. layered app/async dispatch).
+    Fall back to ``get_user_from_request()`` and then ``MCP_DEV_USERNAME``.
+    """
+    from flask import current_app
+
+    from superset.mcp_service.auth import (
+        get_user_from_request,
+        load_user_with_relationships,
+    )
+
+    if getattr(g, "user", None):
+        attached_id = getattr(g.user, "id", None)
+        if attached_id is not None:
+            return int(attached_id)
+
+    try:
+        return int(get_user_from_request().id)
+    except ValueError:
+        pass
+
+    dev_username = current_app.config.get("MCP_DEV_USERNAME")
+    if dev_username:
+        dev_user = load_user_with_relationships(dev_username)
+        if dev_user is not None:
+            return int(dev_user.id)
+
+    return None
+
+
 def _create_dashboard_layout(chart_objects: List[Any]) -> Dict[str, Any]:
     """
     Create a simple dashboard layout with charts arranged in a grid.
@@ -299,22 +334,30 @@ def generate_dashboard(  # noqa: C901
                 if request.description:
                     dashboard.description = request.description
 
-                # Re-query the current user and charts directly in the
-                # current db.session.  g.user was loaded in a Flask
-                # app_context that has since been torn down (the
-                # middleware's ``with flask_app.app_context()`` exits
-                # before the tool function runs), so the User object
-                # is bound to a dead/different scoped session.
-                # Querying fresh avoids all cross-session errors.
+                # Re-query the current user in this db.session (g.user may be detached).
+                # Set owners AND audit FKs so the dashboard appears under Home "mine"
+                # (owners filter) and list filters; NULL created_by/owner hides it from UX.
                 from superset.extensions import security_manager
 
-                current_user = (
-                    db.session.query(security_manager.user_model)
-                    .filter_by(id=g.user.id)
-                    .first()
-                )
+                user_id = _resolve_acting_user_id_for_mcp_dashboard()
+
+                current_user = None
+                if user_id is not None:
+                    current_user = (
+                        db.session.query(security_manager.user_model)
+                        .filter_by(id=user_id)
+                        .first()
+                    )
                 if current_user:
                     dashboard.owners = [current_user]
+                    dashboard.created_by_fk = current_user.id
+                    dashboard.changed_by_fk = current_user.id
+                else:
+                    logger.warning(
+                        "generate_dashboard: could not resolve owner (user_id=%s); "
+                        "dashboard may not appear in Home or owner-based lists",
+                        user_id,
+                    )
 
                 fresh_charts = (
                     db.session.query(Slice)

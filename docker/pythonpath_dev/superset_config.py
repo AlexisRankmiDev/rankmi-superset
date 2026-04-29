@@ -23,9 +23,11 @@
 import logging
 import os
 import sys
+from typing import Any
 
 from celery.schedules import crontab
 from flask_caching.backends.filesystemcache import FileSystemCache
+from sqlalchemy.engine.url import URL
 
 logger = logging.getLogger()
 
@@ -107,12 +109,79 @@ CELERY_CONFIG = CeleryConfig
 
 FEATURE_FLAGS = {"ALERT_REPORTS": True, "DATASET_FOLDERS": True}
 ALERT_REPORTS_NOTIFICATION_DRY_RUN = True
-WEBDRIVER_BASEURL = f"http://superset_app{os.environ.get('SUPERSET_APP_ROOT', '/')}/"  # When using docker compose baseurl should be http://superset_nginx{ENV{BASEPATH}}/  # noqa: E501
-# The base URL for the email report hyperlinks.
-WEBDRIVER_BASEURL_USER_FRIENDLY = (
-    f"http://localhost:8888/{os.environ.get('SUPERSET_APP_ROOT', '/')}/"
-)
+
+# MCP (Model Context Protocol): used by the optional superset-mcp Docker service and
+# local `superset mcp run`. AI clients call this HTTP endpoint; they do not send OpenAI
+# API keys to Superset. For production use JWT/API keys and set MCP_DEV_USERNAME to None.
+MCP_DEV_USERNAME = os.getenv("MCP_DEV_USERNAME", "admin")
+
+if os.getenv("DATABASE_HOST") == "db":
+    _superset_internal_port = os.getenv("SUPERSET_PORT", "8088")
+    # Match docker-compose `${SUPERSET_PORT:-8088}:8088` host port for browser links
+    # (MCP uses get_superset_base_url(); old config hardcoded 8888). Use
+    # SUPERSET_PUBLISHED_HOST_PORT if the UI is reached via another port (e.g. nginx on 80).
+    _superset_browser_port = os.getenv("SUPERSET_PUBLISHED_HOST_PORT", _superset_internal_port)
+    WEBDRIVER_BASEURL = (
+        f"http://superset:{_superset_internal_port}"
+        f"{os.environ.get('SUPERSET_APP_ROOT', '/')}/"
+    )
+    WEBDRIVER_BASEURL_USER_FRIENDLY = (
+        f"http://localhost:{_superset_browser_port}/{os.environ.get('SUPERSET_APP_ROOT', '/')}/"
+    )
+    SUPERSET_WEBSERVER_ADDRESS = os.getenv(
+        "SUPERSET_WEBSERVER_ADDRESS",
+        f"http://superset:{_superset_internal_port}",
+    )
+else:
+    _superset_browser_port_else = os.getenv(
+        "SUPERSET_PUBLISHED_HOST_PORT",
+        os.getenv("SUPERSET_PORT", "8088"),
+    )
+    WEBDRIVER_BASEURL = f"http://superset_app{os.environ.get('SUPERSET_APP_ROOT', '/')}/"  # noqa: E501
+    WEBDRIVER_BASEURL_USER_FRIENDLY = (
+        f"http://localhost:{_superset_browser_port_else}/{os.environ.get('SUPERSET_APP_ROOT', '/')}/"
+    )
 SQLLAB_CTAS_NO_LIMIT = True
+
+
+def _docker_redshift_loopback_mutator(
+    uri: URL,
+    params: dict[str, Any],
+    username: str | None,
+    security_manager: Any,
+    source: Any,
+) -> tuple[URL, dict[str, Any]]:
+    """
+    When Superset runs in Docker and Redshift is reached via Teleport (or any TCP
+    tunnel) bound to 127.0.0.1 on the *host*, connections must use host.docker.internal
+    instead of 127.0.0.1 — inside the container, loopback is not the host.
+
+    Only applies to ``redshift+`` SQLAlchemy URLs. Opt out with
+    ``SUPERSET_DOCKER_REDSHIFT_LOOPBACK_REWRITE=false``.
+    """
+    if os.getenv("SUPERSET_DOCKER_REDSHIFT_LOOPBACK_REWRITE", "true").lower() in (
+        "0",
+        "false",
+        "no",
+    ):
+        return uri, params
+    if os.getenv("DATABASE_HOST") != "db":
+        return uri, params
+    drivername = uri.drivername or ""
+    if not drivername.startswith("redshift"):
+        return uri, params
+    host = uri.host
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return uri, params
+    gateway = os.getenv("DOCKER_HOST_GATEWAY_HOST", "host.docker.internal")
+    new_uri = uri.set(host=gateway)
+    logger.info(
+        "DB_CONNECTION_MUTATOR: Redshift host %s -> %s (Docker + Teleport/tunnel on host)",
+        host,
+        gateway,
+    )
+    return new_uri, params
+
 
 log_level_text = os.getenv("SUPERSET_LOG_LEVEL", "INFO")
 LOG_LEVEL = getattr(logging, log_level_text.upper(), logging.INFO)
@@ -142,3 +211,25 @@ try:
     )
 except ImportError:
     logger.info("Using default Docker config...")
+
+# After optional superset_config_docker import: chain loopback rewrite with any user mutator.
+if os.getenv("DATABASE_HOST") == "db":
+    _prior_db_connection_mutator = globals().get("DB_CONNECTION_MUTATOR")
+
+    def _chained_db_connection_mutator(
+        uri: URL,
+        params: dict[str, Any],
+        username: str | None,
+        security_manager: Any,
+        source: Any,
+    ) -> tuple[URL, dict[str, Any]]:
+        uri2, params2 = _docker_redshift_loopback_mutator(
+            uri, params, username, security_manager, source
+        )
+        if _prior_db_connection_mutator is not None:
+            return _prior_db_connection_mutator(
+                uri2, params2, username, security_manager, source
+            )
+        return uri2, params2
+
+    DB_CONNECTION_MUTATOR = _chained_db_connection_mutator

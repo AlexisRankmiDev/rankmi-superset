@@ -23,6 +23,7 @@ from typing import Any
 
 import pandas as pd
 from flask_babel import gettext as __
+from sqlalchemy.engine.url import URL
 from sqlalchemy.types import NVARCHAR
 
 from superset.db_engine_specs.base import BasicParametersMixin, DatabaseCategory
@@ -242,6 +243,46 @@ class RedshiftEngineSpec(BasicParametersMixin, PostgresBaseEngineSpec):
         "$.aws_iam.external_id": "AWS IAM External ID",
         "$.aws_iam.role_arn": "AWS IAM Role ARN",
     }
+
+    @classmethod
+    def adjust_engine_params(
+        cls,
+        uri: URL,
+        connect_args: dict[str, Any],
+        catalog: str | None = None,
+        schema: str | None = None,
+    ) -> tuple[URL, dict[str, Any]]:
+        """
+        Relax SSL hostname checks for local tunnel development (SSH / port forward).
+
+        When connecting to ``127.0.0.1`` or ``localhost``, the server still presents
+        Redshift's TLS certificate (issued for ``*.redshift.amazonaws.com``), which does
+        not match the loopback host and fails with ``verify-ca`` / hostname validation.
+        Using ``sslmode=require`` encrypts the connection without requiring that the
+        certificate CN/SAN match the client host string (for a trusted local tunnel).
+        Direct connections to real Redshift endpoints are unchanged.
+        """
+        uri, connect_args = super().adjust_engine_params(
+            uri, connect_args, catalog, schema
+        )
+        if catalog:
+            uri = uri.set(database=catalog)
+        if not cls._is_loopback_tunnel_host(uri.host):
+            return uri, connect_args
+
+        # Remove sslmode from the URL (no verify-ca / hostname match on loopback).
+        if uri.query and "sslmode" in uri.query:
+            uri = uri.set(
+                query={k: v for k, v in uri.query.items() if k != "sslmode"}
+            )
+        return uri, {**connect_args, "sslmode": "require"}
+
+    @staticmethod
+    def _is_loopback_tunnel_host(host: str | None) -> bool:
+        if not host:
+            return False
+        host = host.lower()
+        return host in ("127.0.0.1", "localhost", "::1")
 
     @staticmethod
     def update_params_from_encrypted_extra(
